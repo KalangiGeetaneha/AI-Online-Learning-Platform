@@ -123,23 +123,23 @@ export async function POST(req) {
           `,
         });
 
-    } catch (err) {
+  } catch (err) {
 
-      console.log(
-        "Gemini Error:",
-        err
-      );
+  console.log(
+    "Gemini Error:",
+    err
+  );
 
-      return NextResponse.json(
-        {
-          error:
-            "AI quota exceeded"
-        },
-        {
-          status: 429
-        }
-      );
+  return NextResponse.json(
+    {
+      error:
+        "AI server is busy. Please try again later."
+    },
+    {
+      status: 429
     }
+  );
+}
 
     // Get AI Response
     const RawText =
