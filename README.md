@@ -121,9 +121,7 @@ Optimized for Desktop, Tablet, and Mobile devices.
 
 ---
 
-# 📸 Screenshots
 
-Add screenshots here.
 
 Example:
 
