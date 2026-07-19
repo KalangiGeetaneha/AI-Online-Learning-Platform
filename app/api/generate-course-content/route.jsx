@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import Groq from "groq-sdk";
 import { NextResponse } from "next/server";
 import axios from "axios";
 
@@ -32,61 +32,74 @@ Schema:
 User Input:
 `;
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
 });
 
 export async function POST(req) {
   try {
-
     const {
       courseJson,
       courseTitle,
       courseId,
     } = await req.json();
 
-    // Generate Course Content
-    const promises = courseJson?.chapters?.map(
-      async (chapter) => {
+    if (!courseJson?.chapters) {
+      return NextResponse.json(
+        {
+          error: "No chapters found",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    const CourseContent = [];
+
+    for (const chapter of courseJson.chapters) {
+      try {
+        console.log(
+          "Generating chapter:",
+          chapter?.chapterName
+        );
 
         const response =
-          await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+          await groq.chat.completions.create({
+            model: "llama-3.1-8b-instant",
 
-            contents: [
+            messages: [
               {
                 role: "user",
-                parts: [
-                  {
-                    text:
-                      PROMPT +
-                      JSON.stringify(chapter),
-                  },
-                ],
+                content:
+                  PROMPT +
+                  JSON.stringify(chapter),
               },
             ],
+
+            response_format: {
+              type: "json_object",
+            },
+
+            temperature: 0.7,
           });
 
         const RawText =
-          response.candidates[0].content.parts[0]
-            .text;
+          response.choices[0]?.message
+            ?.content;
 
+        console.log("Groq Response:");
         console.log(RawText);
 
         let JSONResp;
 
         try {
-
-          const CleanText = RawText
-            .replace(/```json/g, "")
-            .replace(/```/g, "")
-            .trim();
-
-          JSONResp = JSON.parse(CleanText);
-
+          JSONResp = JSON.parse(RawText);
         } catch (error) {
+          console.log(
+            "Invalid JSON Response"
+          );
 
-          console.log("Invalid JSON");
           console.log(RawText);
 
           JSONResp = {
@@ -96,24 +109,36 @@ export async function POST(req) {
           };
         }
 
-        // Generate Youtube Videos
         const youtubeData =
           await GetYoutubeVideo(
             chapter?.chapterName
           );
 
-        return {
+        CourseContent.push({
           youtubeVideo: youtubeData,
           courseData: JSONResp,
-        };
+        });
+
+      } catch (error) {
+        console.log(
+          "Error generating chapter:",
+          chapter?.chapterName
+        );
+
+        console.log(error);
+
+        CourseContent.push({
+          youtubeVideo: [],
+          courseData: {
+            chapterName:
+              chapter?.chapterName,
+            topics: [],
+          },
+        });
       }
-    );
+    }
 
-    const CourseContent =
-      await Promise.all(promises);
-
-    // Save in Database
-    const dbResp = await db
+    await db
       .update(coursesTable)
       .set({
         courseContent: CourseContent,
@@ -122,7 +147,9 @@ export async function POST(req) {
         eq(coursesTable.cid, courseId)
       );
 
-    console.log(dbResp);
+    console.log(
+      "Course content saved successfully"
+    );
 
     return NextResponse.json({
       courseName: courseTitle,
@@ -131,8 +158,10 @@ export async function POST(req) {
     });
 
   } catch (error) {
-
-    console.log(error);
+    console.log(
+      "Course Generation Error:",
+      error
+    );
 
     return NextResponse.json(
       {
@@ -145,13 +174,14 @@ export async function POST(req) {
   }
 }
 
+
 // ================= YOUTUBE API =================
 
 const YOUTUBE_BASE_URL =
   "https://www.googleapis.com/youtube/v3/search";
 
-const GetYoutubeVideo = async (topic) => {
 
+const GetYoutubeVideo = async (topic) => {
   try {
 
     const params = {
@@ -164,7 +194,9 @@ const GetYoutubeVideo = async (topic) => {
 
     const resp = await axios.get(
       YOUTUBE_BASE_URL,
-      { params }
+      {
+        params,
+      }
     );
 
     const youtubeVideoListResp =
@@ -172,24 +204,32 @@ const GetYoutubeVideo = async (topic) => {
 
     const youtubeVideoList = [];
 
-    youtubeVideoListResp.forEach((item) => {
+    youtubeVideoListResp.forEach(
+      (item) => {
 
-      const data = {
-        videoId: item?.id?.videoId,
-        title: item?.snippet?.title,
-      };
+        const data = {
+          videoId:
+            item?.id?.videoId,
 
-      youtubeVideoList.push(data);
-    });
+          title:
+            item?.snippet?.title,
+        };
 
-    console.log(youtubeVideoList);
+        youtubeVideoList.push(data);
+      }
+    );
+
+    console.log(
+      "Youtube Videos:",
+      youtubeVideoList
+    );
 
     return youtubeVideoList;
 
   } catch (error) {
 
     console.log(
-      "Youtube API Error",
+      "Youtube API Error:",
       error
     );
 

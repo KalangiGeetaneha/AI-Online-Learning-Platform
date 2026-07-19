@@ -1,4 +1,5 @@
 import axios from "axios";
+import Groq from "groq-sdk";
 
 import { db } from "@/app/config/db";
 import { coursesTable } from "@/app/config/schema";
@@ -8,14 +9,12 @@ import {
   auth,
 } from "@clerk/nextjs/server";
 
-import { GoogleGenAI } from "@google/genai";
-
 import { NextResponse } from "next/server";
 
 import { eq } from "drizzle-orm";
 
 const PROMPT = `
-Generate Learning Course depends on following details.
+Generate a learning course based on the following user details.
 
 Make sure to add:
 - Course Name
@@ -25,7 +24,7 @@ Make sure to add:
 - Topics under each chapter
 - Duration for each chapter
 
-Return ONLY JSON format.
+Return ONLY valid JSON.
 
 Schema:
 {
@@ -52,6 +51,10 @@ Schema:
 User Input:
 `;
 
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
 export async function POST(req) {
   try {
     const formData = await req.json();
@@ -60,15 +63,24 @@ export async function POST(req) {
 
     const { sessionClaims } = await auth();
 
+    if (!user) {
+      return NextResponse.json(
+        {
+          error: "Unauthorized",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
     const hasPremiumAccess =
       sessionClaims?.metadata?.plan === "starter";
 
-    // Gemini AI
-    const ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-    });
+    // ==============================
+    // FREE USER COURSE LIMIT
+    // ==============================
 
-    // Free User Course Limit
     if (!hasPremiumAccess) {
       const existingCourses = await db
         .select()
@@ -92,26 +104,46 @@ export async function POST(req) {
       }
     }
 
-    // Generate Course Content
+    // ==============================
+    // GENERATE COURSE USING GROQ
+    // ==============================
+
     let response;
 
     try {
-      response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+      response =
+        await groq.chat.completions.create({
+          model: "llama-3.1-8b-instant",
 
-        contents: `
-${PROMPT}
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a course generation assistant. Always return valid JSON only.",
+            },
+            {
+              role: "user",
+              content:
+                PROMPT +
+                "\n" +
+                JSON.stringify(formData),
+            },
+          ],
 
-${JSON.stringify(formData)}
-        `,
-      });
+          response_format: {
+            type: "json_object",
+          },
+
+          temperature: 0.7,
+        });
+
     } catch (err) {
-      console.log("Gemini Error:", err);
+      console.log("Groq Error:", err);
 
       return NextResponse.json(
         {
           error:
-            "AI server is busy. Please wait 1 minute and try again.",
+            "AI server is busy. Please try again.",
         },
         {
           status: 429,
@@ -119,9 +151,12 @@ ${JSON.stringify(formData)}
       );
     }
 
-    // Extract AI Response
+    // ==============================
+    // EXTRACT GROQ RESPONSE
+    // ==============================
+
     const RawText =
-      response?.candidates?.[0]?.content?.parts?.[0]?.text;
+      response?.choices?.[0]?.message?.content;
 
     if (!RawText) {
       return NextResponse.json(
@@ -134,26 +169,44 @@ ${JSON.stringify(formData)}
       );
     }
 
-    console.log("RAW AI RESPONSE:", RawText);
+    console.log(
+      "RAW GROQ RESPONSE:",
+      RawText
+    );
 
-    // Clean Markdown JSON
-    const CleanText = RawText.replace(/```json/g, "")
+    // ==============================
+    // CLEAN RESPONSE
+    // ==============================
+
+    const CleanText = RawText
+      .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
 
-    console.log("CLEAN TEXT:", CleanText);
+    console.log(
+      "CLEAN TEXT:",
+      CleanText
+    );
 
-    // Parse JSON
+    // ==============================
+    // PARSE JSON
+    // ==============================
+
     let JSONResp;
 
     try {
-      JSONResp = JSON.parse(CleanText);
+      JSONResp =
+        JSON.parse(CleanText);
     } catch (err) {
-      console.log("JSON Parse Error:", err);
+      console.log(
+        "JSON Parse Error:",
+        err
+      );
 
       return NextResponse.json(
         {
-          error: "Invalid AI JSON format",
+          error:
+            "Invalid AI JSON format",
         },
         {
           status: 500,
@@ -161,53 +214,107 @@ ${JSON.stringify(formData)}
       );
     }
 
-    // Generate Banner Image
+    // ==============================
+    // VALIDATE RESPONSE
+    // ==============================
+
+    if (!JSONResp?.course) {
+      console.log(
+        "Invalid Course Structure:",
+        JSONResp
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "AI returned invalid course structure",
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    // ==============================
+    // GENERATE BANNER IMAGE
+    // ==============================
+
     const ImagePrompt =
-      JSONResp?.course?.bannerImagePrompt;
+      JSONResp?.course
+        ?.bannerImagePrompt;
 
-    const bannerImageUrl =
-      await GenerateImage(ImagePrompt);
+    let bannerImageUrl = null;
 
-    // Save Course
+    if (ImagePrompt) {
+      bannerImageUrl =
+        await GenerateImage(
+          ImagePrompt
+        );
+    }
+
+    // ==============================
+    // SAVE COURSE IN DATABASE
+    // ==============================
+
     const result = await db
       .insert(coursesTable)
       .values({
         cid: crypto.randomUUID(),
 
-        name: JSONResp?.course?.name,
+        name:
+          JSONResp?.course?.name,
 
         description:
-          JSONResp?.course?.description,
+          JSONResp?.course
+            ?.description,
 
         noOfChapters:
-          JSONResp?.course?.noOfChapters,
+          JSONResp?.course
+            ?.noOfChapters,
 
         includeVideo:
-          JSONResp?.course?.includeVideo,
+          JSONResp?.course
+            ?.includeVideo,
 
-        level: JSONResp?.course?.level,
+        level:
+          JSONResp?.course?.level,
 
         category:
-          JSONResp?.course?.category,
+          JSONResp?.course
+            ?.category,
 
-        courseJson: JSONResp,
+        courseJson:
+          JSONResp,
 
-        bannerImageUrl: bannerImageUrl,
+        bannerImageUrl:
+          bannerImageUrl,
 
         userEmail:
-          user?.primaryEmailAddress?.emailAddress,
+          user?.primaryEmailAddress
+            ?.emailAddress,
       })
       .returning();
 
+    console.log(
+      "Course created successfully:",
+      result?.[0]?.cid
+    );
+
     return NextResponse.json({
-      courseId: result?.[0]?.cid,
+      courseId:
+        result?.[0]?.cid,
     });
+
   } catch (error) {
-    console.log("SERVER ERROR:", error);
+    console.log(
+      "SERVER ERROR:",
+      error
+    );
 
     return NextResponse.json(
       {
-        error: "Something went wrong",
+        error:
+          "Something went wrong",
       },
       {
         status: 500,
@@ -216,33 +323,62 @@ ${JSON.stringify(formData)}
   }
 }
 
-// Generate Banner Image
-const GenerateImage = async (imagePrompt) => {
+
+// =====================================
+// GENERATE BANNER IMAGE
+// =====================================
+
+const GenerateImage = async (
+  imagePrompt
+) => {
+
   try {
-    const BASE_URL = "https://aigurulab.tech";
 
-    const result = await axios.post(
-      BASE_URL + "/api/generate-image",
+    const BASE_URL =
+      "https://aigurulab.tech";
 
-      {
-        width: 1024,
-        height: 1024,
-        input: imagePrompt,
-        model: "flux",
-        aspectRatio: "16:9",
-      },
+    const result =
+      await axios.post(
 
-      {
-        headers: {
-          "x-api-key": process.env.AI_GURU_LAB,
-          "Content-Type": "application/json",
+        BASE_URL +
+          "/api/generate-image",
+
+        {
+          width: 1024,
+
+          height: 1024,
+
+          input:
+            imagePrompt,
+
+          model:
+            "flux",
+
+          aspectRatio:
+            "16:9",
         },
-      }
-    );
+
+        {
+          headers: {
+
+            "x-api-key":
+              process.env
+                .AI_GURU_LAB,
+
+            "Content-Type":
+              "application/json",
+          },
+        }
+      );
 
     return result.data.image;
+
   } catch (error) {
-    console.log("Image Generation Error:", error);
+
+    console.log(
+      "Image Generation Error:",
+      error
+    );
 
     return null;
   }
